@@ -15,6 +15,7 @@ PLOIDY_PLOT_SCRIPT = f"{SNAKEMAKE_DIR}/scripts/ploidy.R"
 TAXID = config.get("TAXID", "9606")
 INCLUDE_MITO = bool(config.get("INCLUDE_MITO", False))
 HPRC_NAMING = bool(config.get("HPRC_NAMING", False))
+SMAHT_METADATA = bool(config.get("SMAHT_METADATA", False))
 REF_DICT = config["REF"]
 
 ## manifest ==================
@@ -112,9 +113,7 @@ def get_sample_fasta_stats_outputs(wildcards):
     sample = wildcards.sample
     sample_sub = groups[groups["SAMPLE"] == sample]
     final_outputs = [
-        f"results/{sample}/stats/outputs/summary/{sample}.summary.stats"
-    ] + [
-        f"results/{sample}/stats/outputs/summary_by_hap/{row.HAP}.summary.stats"
+        f"results/{sample}/stats/outputs/summary/{row.HAP}.summary.stats"
         for idx, row in sample_sub.iterrows()
     ]
     return final_outputs
@@ -160,10 +159,13 @@ def get_sample_plots_outputs(wildcards):
 def get_sample_smaht_dsa_metadata(wildcards):
     sample = wildcards.sample
     sample_sub = groups[groups["SAMPLE"] == sample]
-    final_outputs = [
-        f"results/{sample}/smaht_dsa_metdata/outputs/{sample}.{row.HAP}.DSA_ExternalQualityMetric.tsv"
-        for idx, row in sample_sub.iterrows()
-    ]
+    if SMAHT_METADATA:
+        final_outputs = [
+            f"results/{sample}/smaht_dsa_metadata/outputs/{sample}.{row.HAP}.DSA_ExternalQualityMetric.tsv"
+            for idx, row in sample_sub.iterrows()
+        ]
+    else:
+        final_outputs = []
     return final_outputs
 
 def get_all_outputs(which_one):
@@ -182,6 +184,8 @@ def get_all_outputs(which_one):
             outputs.extend(get_sample_merqury_final_outputs(wildcards))
         elif which_one == "smaht_dsa_metadata":
             outputs.extend(get_sample_smaht_dsa_metadata(wildcards))
+        elif which_one == "stats":
+            outputs.extend(get_sample_fasta_stats_outputs(wildcards))
     return outputs
 
 localrules: all, gather_outputs_per_sample
@@ -214,15 +218,13 @@ rule get_moddotplots_only:
     input:
         lambda wildcards: get_all_outputs(which_one = "moddot_plots")
 
-rule get_smaht_dsa_metadata_only:
+rule get_metadata_only:
     input:
         lambda wildcards: get_all_outputs(which_one = "smaht_dsa_metadata")
 
 rule get_stats_only:
     input:
-        expand("results/{sample}/stats/outputs/summary/{sample}.summary.stats",
-            sample=samples_with_asm
-        )
+        lambda wildcards: get_all_outputs(which_one = "stats")
         
 rule get_busco_only:
     input:
@@ -246,6 +248,7 @@ rule gather_outputs_per_sample:
 
 
 ##===include MUST BE HERE.
+# include: "rules/fix_sex_chr.smk"
 include: "rules/fcs_gx.smk"
 include: "rules/merqury.smk"
 include: "rules/saffire.smk"

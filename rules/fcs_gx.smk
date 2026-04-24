@@ -470,6 +470,7 @@ rule split_rdna:
         hrs = 12,
     singularity: "docker://eichlerlab/binf-basics:0.1"
     shell: """
+        set -euo pipefail
         if [[ $( wc -l {input.rdna} | awk '{{print $1}}' ) == 0 ]]; then
             cp {input.fasta} {output.cleaned_fasta}
             touch {output.rdna_fasta}

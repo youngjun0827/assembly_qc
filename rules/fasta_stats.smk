@@ -85,6 +85,16 @@ def find_all_hap_summary(wildcards):
     ]
     return outputs[0] if len(outputs) == 1 else outputs
 
+def get_stats_only_inputs():
+    outputs = []
+    for sample in samples_with_asm:
+        result = find_all_hap_summary(type("WC", (), {"sample": sample})())
+        if isinstance(result, str):
+            outputs.append(result)
+        else:
+            outputs.extend(result)
+    return outputs
+
 rule split_scaffolds:
     input:
         scaffold_fasta=rules.rename_fasta.output.final_fasta,
@@ -268,7 +278,7 @@ rule get_telo_stats:
     output:
         scaffold_telo_tbl = "results/{sample}/stats/work/telo/{hap}.scaffold.telo.tbl",
         contig_telo_tbl = "results/{sample}/stats/work/telo/{hap}.contig.telo.tbl",
-        flag = "results/{sample}/stats/flags/get_telo_stats.{hap}.done"
+        flag = touch("results/{sample}/stats/flags/get_telo_stats.{hap}.done")
     singularity:
         "docker://eichlerlab/binf-basics:0.1",
     threads: 1,
@@ -279,7 +289,6 @@ rule get_telo_stats:
         set -euo pipefail
         echo -e "seq_name\tstart\tend\tseq_length" > {output.scaffold_telo_tbl} && seqtk telo {input.scaffold_fasta} >> {output.scaffold_telo_tbl}
         echo -e "seq_name\tstart\tend\tseq_length" > {output.contig_telo_tbl} && seqtk telo {input.contig_fasta} >> {output.contig_telo_tbl}
-        touch {output.flag}
         """
 
 rule get_full_genome_telo_stats:
@@ -289,7 +298,7 @@ rule get_full_genome_telo_stats:
     output:
         telo_tbl = "results/{sample}/stats/work/telo/full_genome.telo.tbl",
         contig_telo_tbl = "results/{sample}/stats/work/telo/full_genome_contigs.telo.tbl",
-        flag = "results/{sample}/stats/flags/get_full_genome_telo_stats.done"
+        flag = touch("results/{sample}/stats/flags/get_full_genome_telo_stats.done")
     singularity:
         "docker://eichlerlab/binf-basics:0.1",
     threads: 1,
@@ -300,7 +309,6 @@ rule get_full_genome_telo_stats:
         set -euo pipefail
         echo -e "seq_name\tstart\tend\tseq_length" > {output.telo_tbl} && seqtk telo {input.full_genome_fasta} >> {output.telo_tbl}
         echo -e "seq_name\tstart\tend\tseq_length" > {output.contig_telo_tbl} && seqtk telo {input.full_genome_contig_fasta} >> {output.contig_telo_tbl}
-        touch {output.flag}
         """    
 
 rule get_contig_stats:
@@ -360,10 +368,11 @@ rule summary_hap_stats:
         scaffold_stats = rules.get_scaffold_stats.output.stats,
         contig_stats = rules.get_contig_stats.output.stats,
         covered_chrom_tsv = "results/{sample}/saffire/outputs/chrom_cov/CHM13/{hap}.minimap2.chrom_cov.tsv",
+        contigs_covered_chrom_tsv = "results/{sample}/saffire/outputs/chrom_cov/CHM13/{hap}.minimap2.contigs_chrom_cov.tsv",
         sample_qv = rules.merqury_run.output.qv,
         busco_result = rules.summarize_compleasm_results.output.summary,
     output:
-        hap_summary = "results/{sample}/stats/outputs/summary_by_hap/{hap}.summary.stats",
+        hap_summary = "results/{sample}/stats/outputs/summary/{hap}.summary.stats",
     params:
         un_qv = "results/{sample}/merqury/outputs/{sample}_un.qv"
     threads: 1,
@@ -374,6 +383,7 @@ rule summary_hap_stats:
         scaffold_stats = input.scaffold_stats
         contig_stats = input.contig_stats
         covered_chrom_tsv = input.covered_chrom_tsv
+        contigs_covered_chrom_tsv = input.contigs_covered_chrom_tsv
         df_scaffold = pd.read_csv(scaffold_stats, sep="\t").add_suffix("_scaffold")
         df_scaffold = df_scaffold.rename(columns = {"sample_scaffold":"sample", "haplotype_scaffold":"haplotype"})
         
@@ -381,6 +391,17 @@ rule summary_hap_stats:
         df_contig = df_contig.rename(columns = {"sample_contig":"sample", "haplotype_contig":"haplotype"})
 
         df = pd.merge(df_scaffold, df_contig, on=["sample","haplotype"], how="outer")
+
+        assigned_chrom_df = pd.read_csv(contigs_covered_chrom_tsv, sep="\t", usecols=["contig", "best_target_chrom"])
+        assigned_chrom_df = assigned_chrom_df[assigned_chrom_df["best_target_chrom"] != "undefined"].copy()
+        count_df = (
+            assigned_chrom_df.groupby("best_target_chrom")["contig"]
+            .nunique()
+            .reset_index(name="n_contigs")
+        )
+        count_df["n_gaps"] = count_df["n_contigs"] - 1
+
+
         if wildcards.hap == "un":
             with open(params.un_qv) as f_un_qv:
                 token = f_un_qv.read().strip().split("\n")[-1].split("\t")
@@ -395,6 +416,10 @@ rule summary_hap_stats:
         covered_chrom_df = pd.read_csv(input.covered_chrom_tsv, sep="\t").set_index("chrom")
         df["chrX_ratio"] = covered_chrom_df.loc["chrX", "covered_pct"]
         df["chrY_ratio"] = covered_chrom_df.loc["chrY", "covered_pct"]
+
+        df["gaps_between_scaffolds"] = count_df["n_gaps"].sum()
+
+
 
         busco_df = pd.read_csv(input.busco_result, sep="\t").set_index(["ASSEMBLY","HAPLOTYPE"])
         busco_df["percent_single_copy"] = (busco_df["S"]/busco_df["N"]*100).round(4)
@@ -420,13 +445,12 @@ rule summary_hap_stats:
                 "aun_scaffold":"scaffold_aun",
                 "bases_contig":"total_ungapped_length",
                 "bases_scaffold":"genome_size",
-                "number_of_gaps_scaffold":"gaps_within_scaffolds",
                 "gc_content_contig":"gc_content",
                 "largest_size_contig":"largest_contig_size",
             }
         )
-        selected_columns = ["chrX_ratio","chrY_ratio","quality_value",\
-        "number_of_contigs", "number_of_scaffolds","gaps_within_scaffolds",\
+        selected_columns = ["chrX_ratio","chrY_ratio","genome_size","quality_value",\
+        "number_of_contigs", "number_of_scaffolds","gaps_between_scaffolds",\
         "number_of_near_T2T_contigs", "number_of_near_T2T_scaffolds", "contig_l50","contig_n50","scaffold_l50", "scaffold_n50","total_ungapped_length", "largest_contig_size","gc_content",\
         "contig_aun", "scaffold_aun", \
         "percent_single_copy","percent_multi_copy","percent_fragmented_copy","percent_missing_copy"
@@ -442,7 +466,7 @@ rule smaht_hap_metadata:
         sample_qv = rules.merqury_run.output.qv,
         busco_result = rules.summarize_compleasm_results.output.summary,
     output:
-        hap_metadata = "results/{sample}/smaht_dsa_metdata/outputs/{sample}.{hap}.DSA_ExternalQualityMetric.tsv",
+        hap_metadata = "results/{sample}/smaht_dsa_metadata/outputs/{sample}.{hap}.DSA_ExternalQualityMetric.tsv",
     params:
         un_qv = "results/{sample}/merqury/outputs/{sample}_un.qv"
     threads: 1,
@@ -479,7 +503,6 @@ rule smaht_hap_metadata:
             .reset_index(name="n_contigs")
         )
         count_df["n_gaps"] = count_df["n_contigs"] - 1
-        print (count_df)
         df["gaps_between_scaffolds"] = count_df["n_gaps"].sum()
 
         busco_df = pd.read_csv(input.busco_result, sep="\t").set_index(["ASSEMBLY","HAPLOTYPE"])
@@ -517,119 +540,3 @@ rule smaht_hap_metadata:
             ]
         df = df[selected_columns]
         df.to_csv(output.hap_metadata, sep="\t", index=False)
-
-rule summarize_full_genome_stats:
-    input:
-        full_genome_stats = rules.get_full_genome_stats.output.stats,
-        full_genome_contig_stats = rules.get_full_genome_contig_stats.output.stats,
-        all_hap_summary = find_all_hap_summary,
-        sample_qv = rules.merqury_run.output.qv
-    output:
-        full_genome_stats = "results/{sample}/stats/outputs/summary/{sample}.summary.stats"
-    threads: 1,
-    resources:
-        hrs=1,
-        mem=4,
-    run:
-        full_genome_stats = input.full_genome_stats
-        full_genome_contig_stats = input.full_genome_contig_stats
-        if isinstance(input.all_hap_summary, str):
-            input_all_hap_summary = [input.all_hap_summary]
-        else:
-            input_all_hap_summary = input.all_hap_summary
-        sample_qv = input.sample_qv
-        df_full_genome_stats = pd.read_csv(full_genome_stats, sep="\t")
-        df_full_genome_contig_stats = pd.read_csv(full_genome_contig_stats, sep="\t")
-
-        df_all_hap = pd.DataFrame()
-        for hap_summary in input_all_hap_summary:
-            hap = os.path.basename(hap_summary).split(".")[0]
-            df_hap = pd.read_csv(hap_summary,sep="\t")
-            df_hap["hap"] = hap
-            df_all_hap = pd.concat([df_all_hap, df_hap])
-        df_all_hap.set_index("hap",drop=True, inplace=True)
-
-        if len(df_all_hap) == 1:
-            ploidy = "Haploid"
-        elif len(df_all_hap) == 2:
-            ploidy = "Diploid"
-        elif len(df_all_hap) > 2:
-            ploidy = "Aneuplod"
-
-        qv_df = pd.read_csv(input.sample_qv, sep="\t", header=None, names=["haplotype","error_count", "total_count", "qv","error_rate"]).drop_duplicates().set_index("haplotype")
-        qv_df = qv_df[pd.to_numeric(qv_df["qv"], errors="coerce").notna()]
-
-        try:
-            quality_value = float(qv_df.loc["Both","qv"])
-        except KeyError:
-            quality_value = float(qv_df.iloc[0]["qv"])
-        
-        # following the DSA metadata sheet (v1.2.0)
-        header = ["assembly","contig_l50","contig_n50","description","gaps_within_scaffolds","gc_content","genome_size","largest_contig_size","number_of_chromosomes","number_of_contigs","number_of_scaffolds", \
-                "percent_fragmented_hap1","percent_fragmented_hap2","percent_missing_hap1","percent_missing_hap2","percent_multi_copy_hap1","percent_multi_copy_hap2","percent_single_copy_hap1","percent_single_copy_hap2",\
-                "ploidy","quality_value","scaffold_l50","scaffold_n50","total_ungapped_length"
-            ]
-
-        contig_l50 = df_full_genome_contig_stats.iloc[0]["l50"]
-        contig_n50 = df_full_genome_contig_stats.iloc[0]["n50"]
-        description = "-"
-        gaps_within_scaffolds = df_full_genome_stats.iloc[0]["number_of_gaps"]
-        gc_content = df_full_genome_contig_stats.iloc[0]["gc_content"]
-        genome_size = df_full_genome_stats.iloc[0]["bases"]
-        largest_contig_size = df_full_genome_contig_stats.iloc[0]["largest_size"]
-        number_of_chromosomes = "-"
-        number_of_contigs = (int(df_full_genome_stats.iloc[0]["total_num_of_contigs"])-int(df_full_genome_stats.iloc[0]["num_of_contigs_with_N"]))
-        number_of_scaffolds = df_full_genome_stats.iloc[0]["num_of_contigs_with_N"]
-        percent_fragmented_hap1 = df_all_hap.loc["hap1", "percent_fragmented_copy"]
-        try:
-            percent_fragmented_hap2 = df_all_hap.loc["hap2", "percent_fragmented_copy"]
-        except KeyError:
-            percent_fragmented_hap2 = "NA"
-
-        percent_missing_hap1 = df_all_hap.loc["hap1", "percent_missing_copy"]
-        try:
-            percent_missing_hap2 = df_all_hap.loc["hap2", "percent_missing_copy"]
-        except KeyError:
-            percent_missing_hap2 = "NA"
-        percent_multi_copy_hap1 = df_all_hap.loc["hap1", "percent_multi_copy"]
-        try:
-            percent_multi_copy_hap2 = df_all_hap.loc["hap2", "percent_multi_copy"]
-        except KeyError:
-            percent_multi_copy_hap2 = "NA"
-        percent_single_copy_hap1 = df_all_hap.loc["hap1", "percent_single_copy"]
-        try:
-            percent_single_copy_hap2 = df_all_hap.loc["hap2", "percent_single_copy"]
-        except KeyError:
-            percent_single_copy_hap2 = "NA"
-        scaffold_l50 = df_full_genome_stats.iloc[0]["l50"]
-        scaffold_n50 = df_full_genome_stats.iloc[0]["n50"]
-        total_ungapped_length = df_full_genome_contig_stats.iloc[0]["bases"]
-
-        metrics = [[wildcards.sample,
-            contig_l50,
-            contig_n50,
-            description,
-            gaps_within_scaffolds,
-            gc_content,
-            genome_size,
-            largest_contig_size,
-            number_of_chromosomes,
-            number_of_contigs,
-            number_of_scaffolds,
-            percent_fragmented_hap1,
-            percent_fragmented_hap2,
-            percent_missing_hap1,
-            percent_missing_hap2,
-            percent_multi_copy_hap1,
-            percent_multi_copy_hap2,
-            percent_single_copy_hap1,
-            percent_single_copy_hap2,
-            ploidy,
-            quality_value,
-            scaffold_l50,
-            scaffold_n50,
-            total_ungapped_length
-        ]]
-
-        outdf = pd.DataFrame(metrics, columns=header)
-        outdf.to_csv(output.full_genome_stats, sep="\t", index=False)

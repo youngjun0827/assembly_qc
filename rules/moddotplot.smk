@@ -82,21 +82,19 @@ checkpoint subset_target_region:
 rule liftover:
     input:
         bed=rules.subset_target_region.output.bed,
-        paf="results/{sample}/saffire/work/alignments/CHM13/pafs/{hap}.minimap2.paf"
+        paf="results/{sample}/saffire/outputs/trimmed_pafs/CHM13/{hap}.minimap2.trimmed.paf"
     output:
         paf= "results/{sample}/moddotplot/work/liftover/CHM13/pafs/{hap}/{region}.paf",
-        flag = "results/{sample}/moddotplot/flags/liftover.{hap}.{region}.done",
+        flag = touch("results/{sample}/moddotplot/flags/liftover.{hap}.{region}.done"),
     resources:
-        mem=24,
+        mem=lambda wildcards, attempt: 48 * attempt,
         hrs=2,
     threads: 1
     singularity:
         "docker://eichlerlab/rustybam:0.1.33"
     shell: """
         set -euo pipefail    
-        tmp_output="{output.paf}.tmp"
         rustybam liftover --bed {input.bed} {input.paf} > {output.paf}
-        touch {output.flag}
         """
 
 rule trim_paf_moddot:
