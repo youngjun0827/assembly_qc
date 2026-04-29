@@ -1,250 +1,254 @@
 # assembly_qc
-The assembly QC pipeline is an integrated pipeline that begins with screening for foreign contamination, incorporating steps from previously conducted assembly QC pipelines. The following results can be obtained:
 
- - Basic Statistics: Includes N50 for both scaftigs and contigs
- - Telomere Region Annotation: BED files generated using seqtk telo
- - Saffire result includes assembly to reference PAF
- - Gene Completeness Assessment: Compleasm (miniBUSCO)
- - Assembly Quality Score (QV): Merqury
- - Projection Plot
- - ModDotPlot for acrocentric regions: Available for human assemblies only
+`assembly_qc` is a Snakemake workflow for assembly quality control. The workflow starts from haplotype-resolved assembly FASTA files, performs contamination/adaptor/rDNA cleaning, then generates assembly statistics, reference-alignment summaries, QV/completeness metrics, BUSCO/compleasm summaries, and human-specific visualization outputs.
 
+## Main outputs
 
-## Getting Started
-Example Config: config/config_asm_qc.yaml
-```commandline
-### general
+For each sample and available haplotype, the workflow can generate:
+
+- cleaned FASTA files after short-contig filtering, FCS-GX/FCS-adaptor screening, optional mitochondrial extraction, rDNA splitting, and final FASTA renaming
+- scaffold/contig assembly statistics, including N50-style summaries and telomere annotations
+- assembly-to-reference PAF, SAF, chromosome coverage summaries, and chain files
+- Merqury QV and completeness outputs from Illumina reads
+- optional trio Merqury hap-mer plots when parental IDs are provided
+- compleasm/BUSCO gene completeness summaries
+- contig length plots, ideograms, ploidy plots, and assembly-eval config files
+- human-only ModDotPlot summaries for acrocentric regions
+- optional SMaHT DSA metadata tables when `SMAHT_METADATA: True`
+
+## Repository layout
+
+```text
+.
+├── Snakefile
+├── config/
+│   ├── config_asm_qc.yaml
+│   └── manifest_asm_qc.tab
+├── rules/
+│   ├── merqury.smk
+│   ├── saffire.smk
+│   ├── compleasm.smk
+│   ├── fasta_stats.smk
+│   ├── moddotplot.smk
+│   └── plots.smk
+├── scripts/
+├── runcluster
+└── runlocal
+```
+
+## Configuration
+
+The default config is:
+
+```yaml
 MANIFEST: config/manifest_asm_qc.tab
+
 REF:
   CHM13:
     PATH: /net/eichler/vol28/eee_shared/assemblies/CHM13/T2T/v2.0/T2T-CHM13v2.fasta
     CHROMS: /net/eichler/vol28/eee_shared/assemblies/CHM13/T2T/v2.0/genome.txt
-    CYTO: /net/eichler/vol28/eee_shared/assemblies/CHM13/T2T/v2.0/anno/cyto.bed ## Optional
+    CYTO: /net/eichler/vol28/eee_shared/assemblies/CHM13/T2T/v2.0/anno/cyto.bed
   GRCh38:
     PATH: /net/eichler/vol28/eee_shared/assemblies/hg38/no_alt/hg38.no_alt.fa
     CHROMS: /net/eichler/vol28/eee_shared/assemblies/hg38/no_alt/genome.txt
-    CYTO: /net/eichler/vol28/eee_shared/assemblies/hg38/no_alt/anno/cyto.bed ## Optional
+    CYTO: /net/eichler/vol28/eee_shared/assemblies/hg38/no_alt/anno/cyto.bed
 
-### compleasm
 DB_PATH: /net/eichler/vol28/eee_shared/buscodb/
 LINEAGE: primates
 MODE: busco
 
-### foreign contamination screening
 TAXID: 9606
-INCLUDE_MITO: true
+INCLUDE_MITO: True
+HPRC_NAMING: True
 ```
 
-Example Manifest ( tab-delemetered )
-```commandline
-SAMPLE    H1    H2    UNASSIGNED      ILLUMINA      FOFN    TRIO    MO_ID   FA_ID
-SAMPLE  test_data/asm/verkko.hap1.fasta test_data/asm/verkko.hap2.fasta test_data/asm/verkko.unassigned.fasta SAMPLE  test_data/fofn/reads.fofn NO  NA  NA
+### Key config fields
+
+| Field | Description |
+| --- | --- |
+| `MANIFEST` | Tab-delimited manifest describing assemblies, read FOFNs, and optional trio information. |
+| `REF` | Reference genomes to use for minimap2/Saffire outputs, ideograms, ploidy plots, and chain files. Each reference requires `PATH` and `CHROMS`; `CYTO` is optional. |
+| `DB_PATH` | BUSCO/compleasm database path. |
+| `LINEAGE` | compleasm lineage, such as `primates`. |
+| `MODE` | compleasm mode, such as `busco`. |
+| `TAXID` | Expected organism taxid for FCS-GX screening. Human-specific downstream outputs are enabled for `9606`. |
+| `INCLUDE_MITO` | Whether mitochondrial FASTA extraction should be included when supported by the workflow settings. |
+| `HPRC_NAMING` | Whether final FASTA names should follow HPRC-style naming logic. |
+
+## Manifest
+
+The manifest is tab-delimited. Current expected columns are:
+
+```text
+SAMPLE  NAME  H1  H2  UNASSIGNED  ILLUMINA  FOFN  TRIO  MO_ID  FA_ID
 ```
 
-## Anlaysis
-Begin with a dry-run
-```commandline
+Example:
+
+```text
+SAMPLE_verkko  SAMPLE  test_data/asm/verkko.hap1.fasta  test_data/asm/verkko.hap2.fasta  test_data/asm/verkko.unassigned.fasta  SAMPLE  test_data/fofn/reads.fofn  NO  NA  NA
+```
+
+### Manifest columns
+
+| Column | Description |
+| --- | --- |
+| `SAMPLE` | Workflow sample ID. This is used in `results/{SAMPLE}`. |
+| `NAME` | Display or output naming value used by the workflow. |
+| `H1` | Haplotype 1 assembly FASTA. Required for a sample to be included in the main workflow. |
+| `H2` | Haplotype 2 assembly FASTA. Optional. |
+| `UNASSIGNED` | Unassigned assembly FASTA. Optional. |
+| `ILLUMINA` | Illumina read sample ID used to locate/read the FOFN for Merqury. Multiple assemblies can share the same Illumina ID. |
+| `FOFN` | File of file names for Illumina FASTQ inputs used by Merqury/meryl. One FASTQ path per line. |
+| `TRIO` | `YES` or `NO`; enables trio Merqury outputs when parental IDs are available. |
+| `MO_ID` | Maternal Illumina sample ID for trio Merqury. Use `NA` if not available. |
+| `FA_ID` | Paternal Illumina sample ID for trio Merqury. Use `NA` if not available. |
+
+## Running the workflow
+
+Run a dry-run first:
+
+```bash
 ./runcluster 30 -np
 ```
 
-If dry-run looks good, proceed with:
-```commandline
-./runcluster 30 
+Run on the cluster:
+
+```bash
+./runcluster 30
 ```
 
-## Major Analysis Output
+Run locally:
 
-
-```commandline
-.
-├── resources
-│   ├── acro_target_beds
-│   │   └── *.bed
-│   ├── meryl
-│   │   └── SAMPLE
-│   │       └── SAMPLE_all.meryl
-│   └── reference
-│       └── {REF}
-│           ├── genome.fa
-│           ├── genome.fa.fai
-│           └── genome_index.txt
-└── results
-    └── SAMPLE
-        ├── assembly_eval_config
-        │   └── output
-        │       └── config_file
-        │           └── SAMPLE.config.yaml
-        ├── chain_files
-        │   ├── outputs
-        │   │   └── {REF}
-        │   │       ├── {hap}.query_to_target.chain
-        │   │       └── {hap}.query_to_target.invert.chain
-        │   └── work
-        │       └── filter_paf
-        ├── compleasm
-        │   ├── outputs
-        │   │   └── summary
-        │   │       └── SAMPLE.summary.tsv
-        │   └── work
-        │       └── summary
-        │           └── {hap}
-        │               ├── primates_odb10
-        │               └── summary.txt
-        ├── complete_flag
-        ├── contamination_screening
-        │   ├── outputs
-        │   │   ├── contig_fasta
-        │   │   │   └── SAMPLE_{hap}.fasta
-        │   │   ├── final_fasta
-        │   │   │   └── SAMPLE_{hap}.fasta
-        │   │   ├── mito_fasta
-        │   │   │   └── {hap}-mt.fasta
-        │   │   └── rdna_fasta
-        │   │       └── {hap}-rdna.fasta
-        │   └── work
-        │       ├── blast
-        │       │   ├── beds
-        │       │   └── outputs
-        │       ├── extract_mito
-        │       │   └── flags
-        │       ├── fastq_cleaning
-        │       │   ├── gx_adapt_cleaning
-        │       │   │   ├── beds
-        │       │   │   └── cleaned_fasta
-        │       │   ├── rdna_cleaning
-        │       │   │   └── beds
-        │       │   └── short_contig_flitering
-        │       │       └── cleaned_fasta
-        │       ├── fcs_adaptor
-        │       │   └── outputs
-        │       │       └── {hap}
-        │       │           ├── cleaned_sequences
-        │       │           │   └── {hap}.filtered.fasta
-        │       │           ├── *.log
-        │       │           ├── *.jsonl
-        │       │           ├── fcs_adaptor_report.txt
-        │       │           ├── pipeline_args.yaml
-        │       │           └── validate_fasta.txt
-        │       ├── fcs_gx
-        │       │   ├── flags
-        │       │   └── outputs
-        │       │       └── {hap}
-        │       │           ├── {hap}.filtered.9606.fcs_gx_report.txt
-        │       │           └── {hap}.filtered.9606.taxonomy.rpt
-        │       ├── hap2_{hap}_merge_for_nucfreq
-        │       │   └── flags
-        │       ├── rdna_cleaning
-        │       │   └── cleaned_fasta
-        │       └── temp
-        ├── merqury
-        │   ├── outputs
-        │   │   ├── logs
-        │   │   ├── SAMPLE.qv
-        │   │   ├── SAMPLE_{hap}.completeness.stats
-        │   │   ├── SAMPLE_{hap}.qv
-        │   └── work
-        │       └── SAMPLE_run{hap}.sh
-        ├── moddotplot
-        │   ├── outputs
-        │   │   ├── contig_stats
-        │   │   │   ├── {hap}.CHM13_lifted_contigs.tab
-        │   │   │   └── {hap}.CHM13_lifted_contigs.tsv
-        │   │   ├── plots
-        │   │   │   └── {hap}
-        │   │   │       ├── {acro_chr}_{position}_{contig_name}_FULL.pdf
-        │   │   │       └── {acro_chr}_{position}_{contig_name}_FULL.png
-        │   │   └── summary
-        │   │       └── {hap}.generated_acros.tsv
-        │   └── work
-        │       ├── find_tigs
-        │       │   ├── beds
-        │       │   ├── flags
-        │       │   └── pafs
-        │       ├── get_pq_tigs
-        │       │   ├── fasta
-        │       │   └── flags
-        │       ├── liftover
-        │       │   └── CHM13 *fixed
-        │       │       ├── pafs
-        │       │       ├── paf_stats
-        │       │       └── trimmed_pafs
-        │       └── selfplot
-        │           └── flags
-        ├── plots
-        │   └── outputs
-        │       ├── contig_length
-        │       │   └── {hap}.scaffold.scatter_logged.png
-        │       ├── ideo
-        │       │   └── {REF}
-        │       │       └── pdf
-        │       │           ├── SAMPLE.minimap2.ideoplot.pdf
-        │       │           └── SAMPLE.minimap2.ideoplot_wide.pdf
-        │       └── ploidy
-        │           └── CHM13 *fixed
-        │               ├── pdf
-        │               │   └── SAMPLE.minimap2.ploidy.pdf
-        │               └── summary
-        │                   └── SAMPLE.minimap2.ploidy_summary.txt
-        ├── saffire
-        │   ├── outputs
-        │   │   ├── chrom_cov
-        │   │   │   └── {REF}
-        │   │   │       └── {hap}.minimap2.chrom_cov.tsv
-        │   │   ├── safs
-        │   │   │   └── {REF}
-        │   │   │       └── {hap}.minimap2.saf
-        │   │   └── trimmed_pafs
-        │   │       └── {REF}
-        │   │           └── {hap}.minimap2.trimmed.paf
-        │   └── work
-        │       ├── alignments
-        │       │   └── {REF}
-        │       │       ├── beds
-        │       │       └── pafs
-        │       ├── chrom_cov
-        │       │   └── flags
-        │       ├── combine_paf
-        │       │   ├── flags
-        │       │   └── {REF}
-        │       └── make_saf
-        │           └── flags
-        └── stats
-            ├── outputs
-            │   ├── summary
-            │   │   └── SAMPLE.summary.stats
-            │   └── summary_by_hap
-            │       └── {hap}.summary.stats
-            └── work
-                ├── fasta_stats
-                │   ├── full_genome.contig.stats
-                │   ├── full_genome.stats
-                │   ├── {hap}.contig.stats
-                │   └── {hap}.scaffold.stats
-                ├── full_genome
-                │   ├── contig_fasta
-                │   │   └── SAMPLE.fasta
-                │   └── SAMPLE.fasta
-                └── telo
-                    ├── flags
-                    │   └── *.done
-                    ├── full_genome_contigs.telo.tbl
-                    ├── full_genome.telo.tbl
-                    ├── {hap}.contig.telo.tbl
-                    └── {hap}.scaffold.telo.tbl
-```
-## Partial Reulsts Options
- - get_saf_only : saffire results including asm to ref paf
- - get_busco_only : BUSCO results (compleasm)
- - get_cleaned_fasta_only : Cleaned fasta
- - get_stats_only : basic statistics such as N50
- - get_qv_only: QV score
- - get_plots_only : ploidy, projection, 
- - get_moddotplots_only: ModDotPlot
-
-```commandline
-./runcluster 30 get_qv get_compleasm
+```bash
+./runlocal 30
 ```
 
+`runcluster` and `runlocal` both resolve the repository path automatically, load `miniconda/4.12.0`, create `log/`, and pass the remaining arguments to Snakemake. `runcluster` submits jobs through DRMAA/SGE with `mfree`, `h_rt`, `threads`, and `-V -cwd -j y` settings. Both wrappers use Singularity/Apptainer and bind `/net`.
 
-## Overview
-![pipeline vector](https://github.com/youngjun0827/assembly_qc/blob/main/rules/assembly_qc.workflow.png)
+To use a different config file:
+
+```bash
+./runcluster 30 --configfile path/to/config.yaml
+```
+
+## Partial workflow targets
+
+You can run selected output groups instead of the full workflow:
+
+```bash
+./runcluster 30 get_cleaned_fasta_only
+./runcluster 30 get_stats_only
+./runcluster 30 get_saf_only
+./runcluster 30 get_qv_only
+./runcluster 30 get_busco_only
+./runcluster 30 get_plots_only
+./runcluster 30 get_moddotplots_only
+```
+
+| Target | Outputs |
+| --- | --- |
+| `get_cleaned_fasta_only` | Final cleaned FASTA files under `results/{sample}/contamination_screening/outputs/final_fasta/`. |
+| `get_stats_only` | Per-haplotype FASTA statistics under `results/{sample}/stats/outputs/summary/`. |
+| `get_saf_only` | Saffire SAF files, chromosome coverage summaries, trimmed PAFs, and human chain files. |
+| `get_qv_only` | Merqury QV and completeness outputs. Trio plots are included when `TRIO=YES`. |
+| `get_busco_only` | compleasm/BUSCO summary TSV. |
+| `get_plots_only` | Contig length plots, ideograms, ploidy plots, and assembly-eval config files. |
+| `get_moddotplots_only` | Human acrocentric ModDotPlot summary and contig statistics. |
+
+## Workflow overview
+
+The full `all` target creates:
+
+```text
+results/{sample}/complete_flag/all_done
+```
+
+for every sample with a valid `H1` assembly in the manifest.
+
+Internally, the workflow includes these rule modules:
+
+1. `fcs_gx.smk`  
+   Links/indexes raw FASTA input, removes very short contigs, runs FCS-GX/adaptor screening, detects mitochondrial and rDNA sequence, splits rDNA, and writes final cleaned FASTA outputs.
+
+2. `merqury.smk`  
+   Builds meryl databases from Illumina FASTQ FOFNs, computes Merqury QV/completeness, and optionally generates trio hap-mer outputs.
+
+3. `saffire.smk`  
+   Prepares reference FASTA resources, aligns cleaned assemblies to each configured reference with minimap2, trims/filters PAFs, generates SAF/chromosome coverage summaries, and creates chain files for human assemblies.
+
+4. `compleasm.smk`  
+   Runs compleasm and summarizes BUSCO-style completeness metrics.
+
+5. `fasta_stats.smk`  
+   Splits scaffolds into contigs, calculates telomere annotations, computes per-haplotype and full-genome assembly statistics, and summarizes stats tables.
+
+6. `moddotplot.smk`  
+   For human assemblies, identifies acrocentric contigs from CHM13 alignments and generates ModDotPlot-related summaries/plots.
+
+7. `plots.smk`  
+   Generates contig length plots, ideogram plots, ploidy plots, and assembly-eval configuration files.
+
+## Important output locations
+
+```text
+results/{sample}/
+├── complete_flag/
+│   └── all_done
+├── contamination_screening/
+│   └── outputs/
+│       ├── final_fasta/{sample}_{hap}.fasta
+│       ├── contig_fasta/{sample}_{hap}.fasta
+│       ├── mito_fasta/{hap}-mt.fasta
+│       └── rdna_fasta/{hap}-rdna.fasta
+├── stats/
+│   └── outputs/
+│       └── summary/{hap}.summary.stats
+├── saffire/
+│   └── outputs/
+│       ├── trimmed_pafs/{ref}/{hap}.minimap2.trimmed.paf
+│       ├── safs/{ref}/{hap}.minimap2.saf
+│       └── chrom_cov/{ref}/{hap}.minimap2.chrom_cov.tsv
+├── chain_files/
+│   └── outputs/
+│       ├── {sample}_{hap}_To_{ref}.chain
+│       └── {sample}_{hap}_To_{ref}.invert.chain
+├── merqury/
+│   └── outputs/
+│       ├── {sample}.qv
+│       └── {sample}_{hap}.qv
+├── compleasm/
+│   └── outputs/
+│       └── summary/{sample}.summary.tsv
+├── plots/
+│   └── outputs/
+│       ├── contig_length/{hap}.scaffold.scatter_logged.png
+│       ├── ideo/{ref}/pdf/{sample}.minimap2.ideoplot.pdf
+│       ├── ideo/{ref}/pdf/{sample}.minimap2.ideoplot_wide.pdf
+│       └── ploidy/{ref}/pdf/{sample}.minimap2.ploidy.pdf
+└── moddotplot/
+    └── outputs/
+        ├── summary/{hap}.generated_acros.tsv
+        └── contig_stats/{hap}.CHM13_lifted_contigs.tsv
+```
+
+Shared resources are written under:
+
+```text
+resources/
+├── reference/{ref}/
+│   ├── genome.fa
+│   ├── genome.fa.fai
+│   └── genome_index.txt
+├── meryl/{ILLUMINA}/
+└── acro_target_beds/
+```
+
+## Notes
+
+- Human-specific outputs, including ModDotPlot and chain files, depend on `TAXID: 9606`.
+- `H1` is required for a sample to be selected by the default workflow.
+- `H2` and `UNASSIGNED` are optional; the workflow runs only for haplotypes present in the manifest.
+- `FOFN` is used for Merqury/meryl input and should list Illumina FASTQ files one per line.
+- The workflow uses Singularity/Apptainer containers through Snakemake’s `--use-singularity` option.
+
